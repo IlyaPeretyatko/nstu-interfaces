@@ -143,7 +143,7 @@ namespace WindowsFormsAppDataGrid
             int width = plot.Width;
             int height = plot.Height;
 
-            if (width < 180 || height < 160)
+            if (width < 180 || height < 180)
             {
                 g.DrawString("Увеличьте область графика",
                     Font, Brushes.Black, 5, 5);
@@ -160,26 +160,70 @@ namespace WindowsFormsAppDataGrid
             float top = Math.Max(80, legendHeight);
 
             RectangleF area = new RectangleF(
-                70, top,
-                width - 85,
-                height - top - Font.Height - 15);
+                75, top,
+                width - 100,
+                height - top - 2 * rowHeight - 12);
 
-            if (area.Height < 30) return;
+            if (area.Width < 60 || area.Height < 30)
+                return;
 
             PointF origin = ToScreen(0, 0);
-
-            double step = Math.Pow(
-                10, Math.Floor(Math.Log10(80.0 / scale)));
-
-            if (step * scale < 40)
-                step *= 5;
-            else if (step * scale < 80)
-                step *= 2;
 
             double minX = (area.Left - origin.X) / scale;
             double maxX = (area.Right - origin.X) / scale;
             double minY = (origin.Y - area.Bottom) / scale;
             double maxY = (origin.Y - area.Top) / scale;
+
+            Func<double, double, double, double> chooseStep =
+                (min, max, desiredPixels) =>
+                {
+                    double step = Math.Pow(
+                        10, Math.Ceiling(Math.Log10(desiredPixels / scale)));
+
+                    for (int attempt = 0; attempt < 20; attempt++)
+                    {
+                        double first = Math.Ceiling(min / step - 1e-9);
+                        double last = Math.Floor(max / step + 1e-9);
+
+                        if (last - first >= 1)
+                            return step;
+
+                        step /= 10;
+                    }
+
+                    return step;
+                };
+
+            double stepX = chooseStep(minX, maxX, 85);
+            double stepY = chooseStep(minY, maxY, rowHeight * 2);
+
+            Func<double, double, string> formatValue = (value, step) =>
+            {
+                if (Math.Abs(value) < step * 0.000001)
+                    value = 0;
+
+                int decimals = Math.Max(
+                    0, (int)Math.Round(-Math.Log10(step)));
+
+                return value.ToString(
+                    "F" + Math.Min(decimals, 15),
+                    CultureInfo.InvariantCulture);
+            };
+
+            var xValues = new List<double>();
+            var yValues = new List<double>();
+
+            double firstX = Math.Ceiling(minX / stepX - 1e-9);
+            double lastX = Math.Floor(maxX / stepX + 1e-9);
+
+            for (int i = 0; i < 1000 && firstX + i <= lastX; i++)
+                xValues.Add((firstX + i) * stepX);
+
+            double firstY = Math.Ceiling(minY / stepY - 1e-9);
+            double lastY = Math.Floor(maxY / stepY + 1e-9);
+
+            for (int i = 0; i < 1000 && firstY + i <= lastY; i++)
+                yValues.Add((firstY + i) * stepY);
 
             GraphicsState state = g.Save();
             g.SetClip(area);
@@ -187,31 +231,25 @@ namespace WindowsFormsAppDataGrid
             using (var gridPen = new Pen(Color.LightGray))
             using (var axisPen = new Pen(Color.Black, 2))
             {
-                for (double x = Math.Ceiling(minX / step) * step;
-                     x <= maxX; x += step)
+                foreach (double x in xValues)
                 {
                     float sx = ToScreen(x, 0).X;
                     g.DrawLine(gridPen, sx, area.Top, sx, area.Bottom);
                 }
 
-                for (double y = Math.Ceiling(minY / step) * step;
-                     y <= maxY; y += step)
+                foreach (double y in yValues)
                 {
                     float sy = ToScreen(0, y).Y;
                     g.DrawLine(gridPen, area.Left, sy, area.Right, sy);
                 }
 
                 if (origin.Y >= area.Top && origin.Y <= area.Bottom)
-                {
                     g.DrawLine(axisPen,
                         area.Left, origin.Y, area.Right, origin.Y);
-                }
 
                 if (origin.X >= area.Left && origin.X <= area.Right)
-                {
                     g.DrawLine(axisPen,
                         origin.X, area.Top, origin.X, area.Bottom);
-                }
             }
 
             for (int i = 0; i < tables.Count; i++)
@@ -235,10 +273,8 @@ namespace WindowsFormsAppDataGrid
                     }
 
                     foreach (PointF point in points)
-                    {
                         g.FillEllipse(brush,
                             point.X - 3, point.Y - 3, 6, 6);
-                    }
                 }
             }
 
@@ -247,61 +283,110 @@ namespace WindowsFormsAppDataGrid
             g.DrawRectangle(Pens.Gray,
                 area.X, area.Y, area.Width, area.Height);
 
-            float previousRight = area.Left - 8;
 
-            for (double x = Math.Ceiling(minX / step) * step;
-                 x <= maxX; x += step)
+            using (var labelFont = new Font(
+                Font.FontFamily, Math.Min(Font.Size, 9f)))
+            using (var centered = new StringFormat())
+            using (var rightAligned = new StringFormat())
             {
-                double value = Math.Abs(x) < step * 0.000001 ? 0 : x;
-                string text = value.ToString("G4");
-                SizeF size = g.MeasureString(text, Font);
+                centered.Alignment = StringAlignment.Center;
+                centered.LineAlignment = StringAlignment.Center;
+                centered.FormatFlags = StringFormatFlags.NoWrap;
 
-                float left = ToScreen(x, 0).X - size.Width / 2;
-                float right = left + size.Width;
+                rightAligned.Alignment = StringAlignment.Far;
+                rightAligned.LineAlignment = StringAlignment.Center;
+                rightAligned.FormatFlags = StringFormatFlags.NoWrap;
 
-                if (left < area.Left ||
-                    right > area.Right ||
-                    left < previousRight + 8)
-                    continue;
+                var occupiedX = new List<RectangleF>();
 
-                g.DrawString(text, Font, Brushes.Black,
-                    left, area.Bottom + 4);
+                Action<int> drawX = index =>
+                {
+                    double value = xValues[index];
+                    float sx = ToScreen(value, 0).X;
+                    string text = formatValue(value, stepX);
+                    float textWidth = g.MeasureString(text, labelFont).Width + 4;
 
-                previousRight = right;
-            }
+                    RectangleF rect = new RectangleF(
+                        sx - textWidth / 2,
+                        area.Bottom + 5,
+                        textWidth,
+                        rowHeight);
 
-            using (var format = new StringFormat())
-            {
-                format.Alignment = StringAlignment.Far;
-                format.LineAlignment = StringAlignment.Center;
-                format.FormatFlags = StringFormatFlags.NoWrap;
-                format.Trimming = StringTrimming.EllipsisCharacter;
+                    rect.X = Math.Max(
+                        2, Math.Min(width - rect.Width - 2, rect.X));
 
-                float previousTop = float.PositiveInfinity;
+                    RectangleF padded = rect;
+                    padded.Inflate(4, 0);
 
-                for (double y = Math.Ceiling(minY / step) * step;
-                     y <= maxY; y += step)
+                    if (occupiedX.Any(r => r.IntersectsWith(padded)))
+                        return;
+
+                    g.DrawString(text, labelFont,
+                        Brushes.Black, rect, centered);
+
+                    occupiedX.Add(padded);
+                };
+
+                foreach (double x in xValues)
+                {
+                    float sx = ToScreen(x, 0).X;
+                    g.DrawLine(Pens.Black,
+                        sx, area.Bottom, sx, area.Bottom + 4);
+                }
+
+                if (xValues.Count > 0)
+                {
+                    drawX(0);
+
+                    if (xValues.Count > 1)
+                        drawX(xValues.Count - 1);
+
+                    for (int i = 1; i < xValues.Count - 1; i++)
+                        drawX(i);
+                }
+
+                var occupiedY = new List<RectangleF>();
+
+                Action<int> drawY = index =>
+                {
+                    double value = yValues[index];
+                    float sy = ToScreen(0, value).Y;
+                    string text = formatValue(value, stepY);
+
+                    RectangleF rect = new RectangleF(
+                        3, sy - rowHeight / 2,
+                        area.Left - 11, rowHeight);
+
+                    RectangleF padded = rect;
+                    padded.Inflate(0, 2);
+
+                    if (occupiedY.Any(r => r.IntersectsWith(padded)))
+                        return;
+
+                    g.DrawString(text, labelFont,
+                        Brushes.Black, rect, rightAligned);
+
+                    occupiedY.Add(padded);
+                };
+
+                foreach (double y in yValues)
                 {
                     float sy = ToScreen(0, y).Y;
-                    float labelTop = sy - rowHeight / 2;
-                    float labelBottom = sy + rowHeight / 2;
-
-                    if (labelTop < area.Top ||
-                        labelBottom > area.Bottom ||
-                        labelBottom > previousTop - 4)
-                        continue;
-
-                    double value = Math.Abs(y) < step * 0.000001 ? 0 : y;
-
-                    g.DrawString(
-                        value.ToString("G4"),
-                        Font, Brushes.Black,
-                        new RectangleF(
-                            4, labelTop, area.Left - 12, rowHeight),
-                        format);
-
-                    previousTop = labelTop;
+                    g.DrawLine(Pens.Black,
+                        area.Left - 4, sy, area.Left, sy);
                 }
+
+                if (yValues.Count > 0)
+                {
+                    drawY(0);
+
+                    if (yValues.Count > 1)
+                        drawY(yValues.Count - 1);
+
+                    for (int i = 1; i < yValues.Count - 1; i++)
+                        drawY(i);
+                }
+
             }
 
             using (var format = new StringFormat())
@@ -322,8 +407,7 @@ namespace WindowsFormsAppDataGrid
                     }
 
                     g.DrawString(
-                        tables[i].Name,
-                        Font, Brushes.Black,
+                        tables[i].Name, Font, Brushes.Black,
                         new RectangleF(
                             36, y, Math.Max(1, width - 124), rowHeight),
                         format);
